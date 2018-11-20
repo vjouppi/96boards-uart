@@ -12,9 +12,10 @@
 
 static const char *progname;
 static struct ftdi_context ftdi;
-static char cbus_shadow = 0;
+static unsigned char cbus_shadow = 0;
 
 static bool attach;
+static int status_pin = 0;
 static int power_pin = 2;
 static int reset_pin = 3;
 static unsigned long pulse_ms = 1000;
@@ -47,6 +48,8 @@ static void usage(void)
 		"Commands:\n"
 		"  power			Pulse the power button signal\n"
 		"  reset			Pulse the reset button signal\n"
+		"  status			Return the status of the board\n"
+		"  status return codes:		0=ON, 1=OFF, <0=error\n"
 		"\n"
 		"This program causes the kernel's ftdi_sio driver to disconnect from the UART device\n"
 		"It can be reconnected by using the --attach option.\n"
@@ -83,6 +86,17 @@ int set_cbus(int pin, int direction, int val)
 	return ftdi_set_bitmode(&ftdi, cbus_shadow, BITMODE_CBUS);
 }
 
+int get_cbus(int pin, int* direction, int* val)
+{
+	unsigned char pins;
+	int rc = ftdi_read_pins(&ftdi, &pins);
+	if(rc < 0)
+		return rc;
+	*direction = !!((pins >> pin) & 0x10);
+	*val = (pins >> pin) & 0x01;
+	return 0;
+}
+
 int pulse_cbus(int pin, int usecs)
 {
 	int rc;
@@ -101,10 +115,12 @@ int main(int argc, char *argv[])
 	int count = 0;
 	int rc;
 	signed char c;
+	int ret = EXIT_SUCCESS;
 
 	progname = argv[0];
 
 	ftdi_init(&ftdi);
+
 
 	while ((c = getopt_long(argc, argv, optstring, long_options, NULL)) >= 0) {
 		switch (c) {
@@ -159,15 +175,33 @@ int main(int argc, char *argv[])
 	if (rc < 0) {
 		fprintf(stderr, "Unable to open ftdi device: %d (%s)\n",
 			rc, ftdi_get_error_string(&ftdi));
-		exit(EXIT_FAILURE);
+		exit(rc);
 	}
-
+	
 	if (count == 1 && strcmp(cmd[0], "reset") == 0) {
 		printf("Pressing reset\n");
 		pulse_cbus(reset_pin, pulse_ms * 1000);
+		// Set the status pin up
+		set_cbus(status_pin, 1, 0);
 	} else if (count == 1 && strcmp(cmd[0], "power") == 0) {
 		printf("Pressing power\n");
 		pulse_cbus(power_pin, pulse_ms * 1000);
+		// Set the status pin down
+		set_cbus(status_pin, 0, 0);
+	} else if (count == 1 && strcmp(cmd[0], "status") == 0) {
+		int val,dir,rc;
+		rc = get_cbus(status_pin, &dir, &val);
+		if(!rc) {
+			ret = val;
+			if(val == 0)
+				printf("Device is ON\n");
+			else
+				printf("Device is OFF\n");
+		}
+		else {
+			ret = rc;
+		}
+		
 	} else if (count == 3 && strcmp(cmd[0], "gpio") == 0) {
 		unsigned int pin = strtoul(cmd[1], NULL, 0);
 		if (pin > 3) {
@@ -184,13 +218,14 @@ int main(int argc, char *argv[])
 			printf("Setting CBUS%i as input\n", pin);
 			set_cbus(pin, 0, 0);
 		}
-	} else {
+	}  else {
 		fprintf(stderr, "Unknown command '%s'\n", cmd[0]);
 		usage();
 		exit(EXIT_FAILURE);
 	}
 
-	ftdi_disable_bitbang(&ftdi);
+
+	//ftdi_disable_bitbang(&ftdi);
 
 	if (attach) {
 		rc = libusb_release_interface(ftdi.usb_dev, ftdi.interface);
@@ -205,5 +240,5 @@ int main(int argc, char *argv[])
 
 	ftdi_usb_close(&ftdi);
 	ftdi_deinit(&ftdi);
-	exit(EXIT_SUCCESS);
+	exit(ret);
 }
